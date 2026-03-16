@@ -5,8 +5,9 @@ import numpy as np
 
 _ocr_reader = None
 
-# Minimum characters across all pages to consider a PDF text-based
-_MIN_TEXT_CHARS = 50
+# Max number of image-only pages to OCR per document. Larger documents
+# (e.g. multi-page drawing packages) are skipped to avoid very long runtimes.
+_MAX_OCR_PAGES = 25
 
 _TEXT_ENCODINGS = ("utf-8", "windows-1252", "latin-1")
 
@@ -18,19 +19,6 @@ def _get_ocr_reader():
 
         _ocr_reader = easyocr.Reader(["no", "en"], gpu=True)
     return _ocr_reader
-
-
-def has_text_layer(file_path: str | Path) -> bool:
-    """Return True if the PDF has enough text to be worth indexing."""
-    file_path = Path(file_path)
-    if file_path.suffix.lower() != ".pdf":
-        return True
-    try:
-        with fitz.open(file_path) as doc:
-            total = sum(len(page.get_text().strip()) for page in doc)
-        return total >= _MIN_TEXT_CHARS
-    except Exception:
-        return False
 
 
 def extract_text(file_path: str | Path) -> str:
@@ -66,6 +54,11 @@ def _extract_pdf(pdf_path: Path) -> str:
                 texts.append(None)
 
         if needs_ocr:
+            ocr_pages = texts.count(None)
+            if ocr_pages > _MAX_OCR_PAGES:
+                raise ValueError(
+                    f"For mange sider for OCR: {ocr_pages} sider uten tekst (maks {_MAX_OCR_PAGES})"
+                )
             reader = _get_ocr_reader()
             for i, page in enumerate(doc):
                 if texts[i] is not None:

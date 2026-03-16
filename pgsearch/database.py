@@ -155,7 +155,8 @@ class DatabaseService:
                                    COALESCE(b.metadata->>'gnr_bnr', '') || ' ' ||
                                    COALESCE(b.metadata->>'saksbehandler', '') || ' ' ||
                                    COALESCE(b.metadata->>'avsender_mottaker', '') || ' ' ||
-                                   COALESCE(b.saksnr, '')
+                                   COALESCE(b.saksnr, '') || ' ' ||
+                                   COALESCE(dc.document_id, '')
                                ),
                                plainto_tsquery('norwegian', %(query_text)s)
                            ) AS meta_score,
@@ -166,7 +167,8 @@ class DatabaseService:
                                        COALESCE(b.metadata->>'gnr_bnr', '') || ' ' ||
                                        COALESCE(b.metadata->>'saksbehandler', '') || ' ' ||
                                        COALESCE(b.metadata->>'avsender_mottaker', '') || ' ' ||
-                                       COALESCE(b.saksnr, '')
+                                       COALESCE(b.saksnr, '') || ' ' ||
+                                       COALESCE(dc.document_id, '')
                                    ),
                                    plainto_tsquery('norwegian', %(query_text)s)
                                ) DESC
@@ -178,7 +180,8 @@ class DatabaseService:
                               COALESCE(b.metadata->>'gnr_bnr', '') || ' ' ||
                               COALESCE(b.metadata->>'saksbehandler', '') || ' ' ||
                               COALESCE(b.metadata->>'avsender_mottaker', '') || ' ' ||
-                              COALESCE(b.saksnr, '')
+                              COALESCE(b.saksnr, '') || ' ' ||
+                              COALESCE(dc.document_id, '')
                           ) @@ plainto_tsquery('norwegian', %(query_text)s)
                     ORDER BY meta_score DESC
                     LIMIT %(candidate_limit)s

@@ -15,7 +15,7 @@ from rich.progress import (
 from pgsearch.chunker import chunk_text
 from pgsearch.database import DatabaseService
 from pgsearch.embedding import EmbeddingService
-from pgsearch.extractor import extract_text, has_text_layer
+from pgsearch.extractor import extract_text
 
 from . import scraper
 from .downloader import download_documents
@@ -153,27 +153,22 @@ def _index_downloaded_files(
     indexed_ids = db.get_indexed_document_ids()
 
     new_files = []
-    skipped_image = 0
     for f in files:
         doc_id = f"{f.parent.name}/{f.name}"
         if doc_id in indexed_ids:
             log.debug("Allerede indeksert, hopper over: %s", f)
             continue
-        if not has_text_layer(f):
-            log.info("Ingen tekstlag (bilde-PDF), hopper over: %s  [%d bytes]", f, f.stat().st_size)
-            skipped_image += 1
-            continue
         new_files.append((f, doc_id))
 
+    already_indexed = len(files) - len(new_files)
     console.print(
         f"Fant [green]{len(files)}[/] fil(er), [green]{len(new_files)}[/] nye "
-        f"(hopper over {len(files) - len(new_files) - skipped_image} allerede indekserte"
-        + (f", [yellow]{skipped_image} bilde-PDF[/]" if skipped_image else "") + ")."
+        f"(hopper over {already_indexed} allerede indekserte)."
     )
 
     log.info(
-        "Indeksering: %d filer totalt, %d nye, %d allerede indeksert, %d bilde-PDF hoppet over",
-        len(files), len(new_files), len(files) - len(new_files) - skipped_image, skipped_image,
+        "Indeksering: %d filer totalt, %d nye, %d allerede indeksert",
+        len(files), len(new_files), already_indexed,
     )
 
     if not new_files:
