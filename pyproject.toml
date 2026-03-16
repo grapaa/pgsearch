@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pgsearch"
+version = "0.1.0"
+description = "Hybrid RAG med pgvector — PDF/TXT indeksering og søk"
+requires-python = ">=3.11"
+dependencies = [
+    "psycopg[binary]>=3.1",
+    "pgvector>=0.3",
+    "openai>=1.0",
+    "pymupdf>=1.24",
+    "easyocr>=1.7",
+    "rich>=13.0",
+    "python-dotenv>=1.0",
+    "httpx>=0.27",
+    "pydantic>=2.0",
+]
+
+[project.scripts]
+pgsearch = "pgsearch.cli:main"

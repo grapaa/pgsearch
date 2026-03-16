@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "*",
+      "Bash(find /c/git/pgsearch -name \"*.csproj\" -o -name \"*.cs\" 2>/dev/null | head -30)",
+      "Bash(grep -r \"appsettings\" /c/git/PostlisteSok --include=\"*.json\" 2>/dev/null | head -5)",
+      "WebSearch",
+      "Bash(dotnet restore:*)",
+      "Bash(dotnet build:*)",
+      "Bash(docker run:*)"
+    ]
+  }
+}
