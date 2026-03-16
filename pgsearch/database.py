@@ -1,23 +1,34 @@
 import json
+from contextlib import contextmanager
 
 import psycopg
 from psycopg.rows import dict_row
 from pgvector.psycopg import register_vector
-
-from pgsearch.utils import extract_saksnr
 
 
 class DatabaseService:
     def __init__(self, connection_string: str):
         self._conninfo = connection_string
 
-    def _connect(self) -> psycopg.Connection:
-        conn = psycopg.connect(self._conninfo, autocommit=True)
+    @contextmanager
+    def _connection(self, autocommit: bool = True):
+        """Context manager that always closes the connection on exit."""
+        conn = psycopg.connect(self._conninfo, autocommit=autocommit, connect_timeout=10)
         register_vector(conn)
-        return conn
+        try:
+            yield conn
+        except Exception:
+            if not autocommit:
+                conn.rollback()
+            raise
+        else:
+            if not autocommit:
+                conn.commit()
+        finally:
+            conn.close()
 
     def setup(self) -> None:
-        with self._connect() as conn:
+        with self._connection() as conn:
             conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
 
             conn.execute("""
@@ -44,19 +55,6 @@ class DatabaseService:
             """)
 
             conn.execute("""
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1 FROM information_schema.columns
-                        WHERE table_name = 'document_chunks' AND column_name = 'saksnr'
-                    ) THEN
-                        ALTER TABLE document_chunks
-                            ADD COLUMN saksnr TEXT REFERENCES byggesaker(saksnr);
-                    END IF;
-                END $$;
-            """)
-
-            conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_chunks_embedding_hnsw ON document_chunks
                     USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
             """)
@@ -72,7 +70,7 @@ class DatabaseService:
             """)
 
     def upsert_byggesaker(self, saker: list[dict]) -> None:
-        with self._connect() as conn:
+        with self._connection() as conn:
             with conn.cursor() as cur:
                 cur.executemany(
                     """
@@ -90,32 +88,11 @@ class DatabaseService:
                     ],
                 )
 
-    def backfill_saksnr(self) -> int:
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT id, metadata->>'source_path' FROM document_chunks WHERE saksnr IS NULL;"
-            ).fetchall()
-
-            valid = {
-                r[0]
-                for r in conn.execute("SELECT saksnr FROM byggesaker;").fetchall()
-            }
-
-            count = 0
-            for chunk_id, source_path in rows:
-                if not source_path:
-                    continue
-                saksnr = extract_saksnr(source_path)
-                if saksnr and saksnr in valid:
-                    conn.execute(
-                        "UPDATE document_chunks SET saksnr = %(saksnr)s WHERE id = %(id)s;",
-                        {"saksnr": saksnr, "id": chunk_id},
-                    )
-                    count += 1
-            return count
-
     def insert_chunks(self, chunks: list[dict]) -> None:
-        with self._connect() as conn:
+        # autocommit=False: all chunks for a document are committed atomically.
+        # If the process crashes mid-batch, nothing is stored and the document
+        # will be retried on the next run.
+        with self._connection(autocommit=False) as conn:
             with conn.cursor() as cur:
                 cur.executemany(
                     """
@@ -147,7 +124,7 @@ class DatabaseService:
         top_k: int = 10,
         candidate_limit: int = 50,
     ) -> list[dict]:
-        with self._connect() as conn:
+        with self._connection() as conn:
             conn.row_factory = dict_row
             return conn.execute(
                 """
@@ -252,22 +229,28 @@ class DatabaseService:
             ).fetchall()
 
     def get_statistics(self) -> dict:
-        with self._connect() as conn:
-            row = conn.execute("""
-                SELECT COUNT(DISTINCT document_id), COUNT(*)
-                FROM document_chunks;
-            """).fetchone()
-            return {"documents": row[0], "chunks": row[1]}
+        try:
+            with self._connection() as conn:
+                row = conn.execute("""
+                    SELECT COUNT(DISTINCT document_id), COUNT(*)
+                    FROM document_chunks;
+                """).fetchone()
+                return {"documents": row[0], "chunks": row[1]}
+        except psycopg.errors.UndefinedTable:
+            raise RuntimeError("Databasen er ikke satt opp. Kjør 'Sett opp database' (valg 1) først.")
 
     def get_indexed_document_ids(self) -> set[str]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT DISTINCT document_id FROM document_chunks;"
-            ).fetchall()
-            return {row[0] for row in rows}
+        try:
+            with self._connection() as conn:
+                rows = conn.execute(
+                    "SELECT DISTINCT document_id FROM document_chunks;"
+                ).fetchall()
+                return {row[0] for row in rows}
+        except psycopg.errors.UndefinedTable:
+            raise RuntimeError("Databasen er ikke satt opp. Kjør 'Sett opp database' (valg 1) først.")
 
     def delete_document(self, document_id: str) -> int:
-        with self._connect() as conn:
+        with self._connection() as conn:
             cur = conn.execute(
                 "DELETE FROM document_chunks WHERE document_id = %(doc_id)s;",
                 {"doc_id": document_id},

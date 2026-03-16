@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, date
 from pathlib import Path
 
@@ -9,22 +10,20 @@ from rich import box
 from pgsearch.config import get_config
 from pgsearch.database import DatabaseService
 from pgsearch.embedding import EmbeddingService
-from pgsearch.indexer import index_directory
 from pgsearch.innsyn.pipeline import run_daily_pipeline, run_range_pipeline
-from pgsearch.metadata_loader import load_metadata
 from pgsearch.searcher import search, display_results
 
 console = Console()
 
+logging.getLogger("pgsearch").setLevel(logging.INFO)
+log = logging.getLogger("pgsearch")
+
 MENU_CHOICES = [
     "1. Sett opp database",
-    "2. Indekser dokumenter",
-    "3. Hybrid-søk",
-    "4. Vis statistikk",
-    "5. Last inn byggesak-metadata",
-    "6. Oppdater saksnr på eksisterende chunks",
-    "7. Indekser byggesaker fra Innsyn",
-    "8. Avslutt",
+    "2. Hybrid-søk",
+    "3. Vis statistikk",
+    "4. Indekser byggesaker fra Innsyn",
+    "5. Avslutt",
 ]
 
 
@@ -43,44 +42,38 @@ def main():
         for c in MENU_CHOICES:
             console.print(f"  {c}")
 
-        choice = Prompt.ask(
-            "Velg", choices=["1", "2", "3", "4", "5", "6", "7", "8"], default="3"
-        )
+        try:
+            choice = Prompt.ask(
+                "Velg", choices=["1", "2", "3", "4", "5"], default="2"
+            )
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[yellow]Avslutter.[/]")
+            break
 
-        match choice:
-            case "1":
-                _setup_database(db)
-            case "2":
-                _index_documents(db, embedding)
-            case "3":
-                _search(db, embedding)
-            case "4":
-                _show_statistics(db)
-            case "5":
-                _load_metadata(db)
-            case "6":
-                _backfill_saksnr(db)
-            case "7":
-                _index_byggesaker(db, embedding)
-            case "8":
-                break
+        try:
+            match choice:
+                case "1":
+                    _setup_database(db)
+                case "2":
+                    _search(db, embedding)
+                case "3":
+                    _show_statistics(db)
+                case "4":
+                    _index_byggesaker(db, embedding)
+                case "5":
+                    break
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Avbrutt.[/]")
+            log.info("Avbrutt av bruker (Ctrl-C)")
+        except Exception as e:
+            log.exception("Uventet feil")
+            console.print(f"[red]Feil: {e}[/]")
 
 
 def _setup_database(db: DatabaseService) -> None:
     with console.status("Setter opp database..."):
         db.setup()
     console.print("[green]Database satt opp med pgvector extension, tabell og indekser.[/]")
-
-
-def _index_documents(db: DatabaseService, embedding: EmbeddingService) -> None:
-    default_path = str(Path.cwd() / "SampleData")
-    directory = Prompt.ask("Sti til mappe med dokumenter", default=default_path)
-
-    if not Path(directory).is_dir():
-        console.print(f"[red]Mappen finnes ikke: {directory}[/]")
-        return
-
-    index_directory(db, embedding, directory)
 
 
 def _search(db: DatabaseService, embedding: EmbeddingService) -> None:
@@ -96,21 +89,16 @@ def _search(db: DatabaseService, embedding: EmbeddingService) -> None:
     display_results(results)
 
 
-def _load_metadata(db: DatabaseService) -> None:
-    default_path = str(Path.cwd() / "SampleData" / "processed")
-    directory = Prompt.ask("Sti til mappe med JSONL-filer", default=default_path)
+def _show_statistics(db: DatabaseService) -> None:
+    stats = db.get_statistics()
 
-    if not Path(directory).is_dir():
-        console.print(f"[red]Mappen finnes ikke: {directory}[/]")
-        return
+    table = Table(box=box.ROUNDED)
+    table.add_column("Metrikk")
+    table.add_column("Verdi")
+    table.add_row("Dokumenter", str(stats["documents"]))
+    table.add_row("Chunks", str(stats["chunks"]))
 
-    load_metadata(db, directory)
-
-
-def _backfill_saksnr(db: DatabaseService) -> None:
-    with console.status("Oppdaterer saksnr på eksisterende chunks..."):
-        count = db.backfill_saksnr()
-    console.print(f"[green]Oppdaterte {count} chunks med saksnr.[/]")
+    console.print(table)
 
 
 def _index_byggesaker(db: DatabaseService, embedding: EmbeddingService) -> None:
@@ -126,6 +114,9 @@ def _index_byggesaker(db: DatabaseService, embedding: EmbeddingService) -> None:
         except ValueError:
             console.print("[red]Ugyldig datoformat. Bruk dd.MM.yyyy-dd.MM.yyyy[/]")
             return
+        if from_date > to_date:
+            console.print("[red]Fra-dato må være før eller lik til-dato.[/]")
+            return
         run_range_pipeline(db, embedding, from_date, to_date, data_dir)
     else:
         try:
@@ -134,18 +125,6 @@ def _index_byggesaker(db: DatabaseService, embedding: EmbeddingService) -> None:
             console.print("[red]Ugyldig datoformat. Bruk dd.MM.yyyy[/]")
             return
         run_daily_pipeline(db, embedding, target_date, data_dir)
-
-
-def _show_statistics(db: DatabaseService) -> None:
-    stats = db.get_statistics()
-
-    table = Table(box=box.ROUNDED)
-    table.add_column("Metrikk")
-    table.add_column("Verdi")
-    table.add_row("Dokumenter", str(stats["documents"]))
-    table.add_row("Chunks", str(stats["chunks"]))
-
-    console.print(table)
 
 
 if __name__ == "__main__":

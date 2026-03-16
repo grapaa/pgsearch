@@ -5,6 +5,10 @@ def chunk_text(text: str, max_chunk_size: int = 1000, overlap: int = 200) -> lis
     if not text or not text.strip():
         return []
 
+    step = max_chunk_size - overlap
+    if step <= 0:
+        raise ValueError(f"overlap ({overlap}) må være mindre enn max_chunk_size ({max_chunk_size})")
+
     paragraphs = re.split(r"\r?\n\r?\n", text)
     paragraphs = [p.strip() for p in paragraphs if p.strip()]
 
@@ -34,6 +38,6 @@ def chunk_text(text: str, max_chunk_size: int = 1000, overlap: int = 200) -> lis
             while i < len(chunk):
                 end = min(i + max_chunk_size, len(chunk))
                 result.append(chunk[i:end].strip())
-                i += max_chunk_size - overlap
+                i += step
 
     return result

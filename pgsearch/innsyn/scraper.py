@@ -161,8 +161,7 @@ def fetch_byggesaker(target_date: date) -> list[ByggesakDokument]:
             if "errors" in data:
                 errors = data["errors"]
                 error_msg = errors[0].get("message", "Unknown error") if errors else "Unknown error"
-                console.print(f"  [red]GraphQL feil: {error_msg}[/red]")
-                break
+                raise RuntimeError(f"GraphQL feil ved offset {offset}: {error_msg}")
 
             journals = data.get("data", {}).get("journals", {})
             nodes = journals.get("nodes", [])

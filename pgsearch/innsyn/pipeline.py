@@ -1,3 +1,5 @@
+import logging
+from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -13,14 +15,37 @@ from rich.progress import (
 from pgsearch.chunker import chunk_text
 from pgsearch.database import DatabaseService
 from pgsearch.embedding import EmbeddingService
-from pgsearch.extractor import extract_text
+from pgsearch.extractor import extract_text, has_text_layer
 
 from . import scraper
 from .downloader import download_documents
-from .filter import should_index
+
 from .models import ByggesakDokument
 
 console = Console()
+log = logging.getLogger("pgsearch.pipeline")
+
+_LOG_DIR = Path(__file__).parent.parent.parent / "logs"
+_LOG_FORMATTER = logging.Formatter(
+    "%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+
+@contextmanager
+def _date_log(date_str: str):
+    """Add a per-date FileHandler to the pgsearch logger for the duration of a pipeline run."""
+    _LOG_DIR.mkdir(exist_ok=True)
+    log_path = _LOG_DIR / f"{date_str}.log"
+    handler = logging.FileHandler(log_path, encoding="utf-8")
+    handler.setFormatter(_LOG_FORMATTER)
+    root = logging.getLogger("pgsearch")
+    root.addHandler(handler)
+    try:
+        yield log_path
+    finally:
+        handler.close()
+        root.removeHandler(handler)
 
 
 def run_daily_pipeline(
@@ -30,36 +55,49 @@ def run_daily_pipeline(
     data_dir: Path,
 ) -> None:
     """Run the full innsyn pipeline for a single date."""
+    date_str = target_date.strftime("%Y-%m-%d")
+    with _date_log(date_str):
+        _run_daily_pipeline(date_str, target_date, db, embedding, data_dir)
+
+
+def _run_daily_pipeline(
+    date_str: str,
+    target_date: date,
+    db: DatabaseService,
+    embedding: EmbeddingService,
+    data_dir: Path,
+) -> None:
+    log.info("=== Pipeline start: %s ===", date_str)
     console.print(f"\n[bold cyan]Henter byggesaker for {target_date.strftime('%d.%m.%Y')}...[/]")
 
     # 1. Scrape from GraphQL API
     docs = scraper.fetch_byggesaker(target_date)
+    log.info("Hentet %d journalposter for %s", len(docs), date_str)
     if not docs:
         console.print("[yellow]Ingen dokumenter funnet for denne datoen.[/]")
         return
 
-    # 2. Upsert byggesak metadata (alle saker, også filtrerte)
+    # 2. Upsert byggesak metadata
     saker = _docs_to_byggesaker(docs)
     if saker:
+        console.print(f"Lagrer metadata for {len(saker)} saker...")
         db.upsert_byggesaker(saker)
         console.print(f"[green]Lagret metadata for {len(saker)} saker.[/]")
+        log.info("Upsert %d saker: %s", len(saker), [s["saksnr"] for s in saker])
 
-    # 3. Filtrer — fjern tegninger/bilder
-    filtered_docs = _filter_docs(docs)
-    skipped = len(docs) - len(filtered_docs)
-    if skipped:
-        console.print(f"[yellow]Filtrert bort {skipped} tegninger/bilder.[/]")
+    # 3. Download PDFs to disk
+    console.print(f"\n[bold cyan]Laster ned {len(docs)} dokumenter...[/]")
+    downloaded, skipped, failed = download_documents(docs, target_date, data_dir, console)
+    log.info("Nedlasting ferdig: %d lastet ned, %d hoppet over, %d feilet", downloaded, skipped, failed)
 
-    # 4. Download PDFs to disk (kun filtrerte)
-    console.print(f"\n[bold cyan]Laster ned {len(filtered_docs)} dokumenter...[/]")
-    download_documents(filtered_docs, target_date, data_dir)
-
-    # 5. Index downloaded files
+    # 4. Index downloaded files
     date_folder = data_dir / "raw" / target_date.strftime("%Y-%m-%d")
     if not date_folder.exists():
+        log.warning("Mappe finnes ikke etter nedlasting: %s", date_folder)
         return
 
     _index_downloaded_files(db, embedding, date_folder)
+    log.info("=== Pipeline ferdig: %s ===", date_str)
 
 
 def run_range_pipeline(
@@ -74,20 +112,6 @@ def run_range_pipeline(
     while current <= to_date:
         run_daily_pipeline(db, embedding, current, data_dir)
         current += timedelta(days=1)
-
-
-def _filter_docs(docs: list[ByggesakDokument]) -> list[ByggesakDokument]:
-    """Remove documents with drawing/sketch/photo titles, and filter vedlegg."""
-    filtered = []
-    for doc in docs:
-        if not should_index(doc.beskrivelse):
-            continue
-        # Filter vedlegg on the kept documents
-        kept_vedlegg = [v for v in doc.vedlegg if should_index(v.navn)]
-        if len(kept_vedlegg) != len(doc.vedlegg):
-            doc = doc.model_copy(update={"vedlegg": kept_vedlegg})
-        filtered.append(doc)
-    return filtered
 
 
 def _docs_to_byggesaker(docs: list) -> list[dict]:
@@ -123,20 +147,33 @@ def _index_downloaded_files(
 
     if not files:
         console.print("[yellow]Ingen filer å indeksere.[/]")
+        log.warning("Ingen filer funnet i %s", date_folder)
         return
 
     indexed_ids = db.get_indexed_document_ids()
 
-    # document_id = "{saksnr_folder}/{filename}" for uniqueness across saker
     new_files = []
+    skipped_image = 0
     for f in files:
         doc_id = f"{f.parent.name}/{f.name}"
-        if doc_id not in indexed_ids:
-            new_files.append((f, doc_id))
+        if doc_id in indexed_ids:
+            log.debug("Allerede indeksert, hopper over: %s", f)
+            continue
+        if not has_text_layer(f):
+            log.info("Ingen tekstlag (bilde-PDF), hopper over: %s  [%d bytes]", f, f.stat().st_size)
+            skipped_image += 1
+            continue
+        new_files.append((f, doc_id))
 
     console.print(
         f"Fant [green]{len(files)}[/] fil(er), [green]{len(new_files)}[/] nye "
-        f"(hopper over {len(files) - len(new_files)} allerede indekserte)."
+        f"(hopper over {len(files) - len(new_files) - skipped_image} allerede indekserte"
+        + (f", [yellow]{skipped_image} bilde-PDF[/]" if skipped_image else "") + ")."
+    )
+
+    log.info(
+        "Indeksering: %d filer totalt, %d nye, %d allerede indeksert, %d bilde-PDF hoppet over",
+        len(files), len(new_files), len(files) - len(new_files) - skipped_image, skipped_image,
     )
 
     if not new_files:
@@ -157,6 +194,7 @@ def _index_downloaded_files(
             try:
                 _index_file(db, embedding, file_path, doc_id)
             except Exception as e:
+                log.error("Feil ved indeksering av %s: %s", file_path, e, exc_info=True)
                 console.print(f"[red]Feil ved {file_path.name}: {e}[/]")
             progress.advance(task)
 
@@ -170,9 +208,11 @@ def _index_file(
     document_id: str,
 ) -> None:
     """Extract, chunk, embed, and store a single file."""
+    file_size = file_path.stat().st_size
     text = extract_text(file_path).replace("\0", "")
 
     if not text.strip():
+        log.warning("Tom fil — ingen tekst ekstrahert: %s  [%d bytes]", file_path, file_size)
         console.print(f"[yellow]Tom fil: {file_path.name}[/]")
         return
 
@@ -201,3 +241,7 @@ def _index_file(
     ]
 
     db.insert_chunks(db_chunks)
+    log.info(
+        "Indeksert: %s  [saksnr=%s, %d chunks, %d bytes]",
+        file_path, saksnr, len(chunks), file_size,
+    )

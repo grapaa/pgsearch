@@ -9,6 +9,7 @@ class EmbeddingService:
             azure_endpoint=endpoint,
             api_key=api_key,
             api_version="2024-02-01",
+            max_retries=5,  # exponential backoff on 429/503
         )
         self._deployment = deployment
 
